@@ -30,6 +30,10 @@
 ;  <jreiser@users.sourceforge.net>
 */
 
+#ifndef BIG_ENDIAN  //{
+#define BIG_ENDIAN 0
+#endif  //}
+
 #include "arch/powerpc/64le/macros.S"
 #include "arch/powerpc/64le/ppc_regs.h"
 
@@ -66,7 +70,7 @@ uncompress:
 
 SZ_DLINE=128  # size of data cache line in Apple G5
 
-/* register assingments for NRV algorithms */
+/* register assignments for NRV algorithms */
 #define  hibit r0  /* holds 0x80000000 during decompress */
 
 #define src  a0

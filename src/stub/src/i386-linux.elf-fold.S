@@ -32,11 +32,14 @@
 #include "arch/i386/macros.S"
 
 
-#define PAGE_SIZE ( 1<<12)
+PAGE_SIZE= ( 1<<12)
+PATH_MAX= 4096
+
+ET_DYN= 3
 #define szElf32_Ehdr 0x34
 #define szElf32_Phdr 8*4
-#define e_type    16
-#define e_phnum   44
+e_type=   16
+e_phnum=  44
 #define e_entry  (16 + 2*2 + 4)
 #define p_memsz  5*4
 #define szb_info 12
@@ -46,120 +49,155 @@
 #define a_val  4
 #define sz_auxv 8
 
-#define __NR_readlink 85
-#define __NR_munmap   91
+__NR_readlink= 85
+__NR_munmap=   91
+__NR_open= 5
+__NR_close= 6
+__NR_mmap= 0xc0
+
+MAP_PRIVATE=   0x02
+MAP_FIXED=     0x10
+
+PROT_READ=     0x1
+
+O_RDONLY=       0
 
 // control just falls through, after this part and compiled C code
 // are uncompressed.
 
-fold_begin:  // enter: %ebx= &Elf32_Ehdr of this program; %ebp= f_expand
-        //   %edi=total length of compressed data
-        // patchLoader will modify to be
-        //   dword sz_uncompressed, sz_compressed
-        //   byte  compressed_data...
+// enter:
+// %ebp= f_expand
+// %esp/ LENX,ADRX,slide,fd,LENU,ADRU,entry,argc,argv,0,envp,0,auxv,0,strings
+//      (LENU,ADRU) = params for final munmap()
+//      (LENX,ADRX) = extent of compressed program (after moving)
 
-// ld-linux.so.2 depends on AT_PHDR and AT_ENTRY, for instance.
-// Move argc,argv,envp down to make room for Elf_auxv table.
-// Linux kernel 2.4.2 and earlier give only AT_HWCAP and AT_PLATFORM
-// because we have no PT_INTERP.  Linux kernel 2.4.5 (and later?)
-// give not quite everything.  It is simpler and smaller code for us
-// to generate a "complete" table where Elf_auxv[k -1].a_type = k.
-// On second thought, that wastes a lot of stack space (the entire kernel
-// auxv, plus those slots that remain empty anyway).  So try for minimal
-// space on stack, without too much code, by doing it serially.
+fold_begin:
+////    int3  // DEBUG
+        mov esi,esp; sub esp,PATH_MAX
+        mov edi,esp; push 8; pop ecx; rep movsd  // copy LENX,ADRX,slide,fd,LENU,ADRU,entry,argc
 
-#define AT_NULL   0
-#define AT_IGNORE 1
-#define AT_PHDR   3
-#define AT_PHENT  4
-#define AT_PHNUM  5
-#define AT_PAGESZ 6
-#define AT_ENTRY  9
+        push ebp  // f_exp
+        mov ebp,esp  // frame: f_exp,LENX,ADRX,slide,fd,LENU,ADRU,entry,argc
+F_fd= 4*4  // frame offset to fd
+0:
+        lodsd; test %eax,%eax; stosd; jne 0b  // argv
+        push edi  // &new_env[0]; f_exp,LENX,ADRX,slide,fd,LENU,ADRU,entry,argc
+        stosd  // space for new_env[0]
+0:
+        lodsd; test %eax,%eax; stosd; jne 0b  // env
+        push edi  // &old_auxv,&new_env[0]; f_exp,LENX,ADRX,slide,fd,LENU,ADRU,entry,argc
+0:
+        lodsd; test %eax,%eax; stosd; movsd; jne 0b  // auxv
 
-#define ET_DYN    3
+        inc eax  // 1, AT_IGNORE
+        sub edi,2*4  // back to {AT_NULL}
+        mov ecx,5*2; rep stosd  // 5 extra slots of AT_IGNORE
+        dec eax; stosd; stosd  // 0, AT_NULL
+        sub [-2*4 + ebp],edi  // -len_aux
+        push edi  // P_07  &new_aux[N],-len_aux,&new_env[0]; f_exp,LENX,ADRX,slide,fd,LENU,ADRU,entry,argc
+        push esi  // &strings,&new_aux[N],-len_aux,&new_env[0]; f_exp,LENX,ADRX,slide,fd,LENU,ADRU,fd,entry,argc
 
-        push edi  // save total length of compressed data
-        push ebx  // save &Elf32_Ehdr
-        sub ecx, ecx
-        mov edx, (1<<AT_PHDR) | (1<<AT_PHENT) | (1<<AT_PHNUM) | (1<<AT_PAGESZ) | (1<<AT_ENTRY)
-        mov esi, esp
-        mov edi, esp
-        sub ebx, ebx  // 0
-        call do_auxv  // clear bits in edx according to existing auxv slots
-        lea ebx,[4+ ecx]  // 4 for new envp[0]
-
-        mov esi, esp
-L50:
-        shr edx, 1  // Carry = bottom bit
-        sbb eax, eax  // -1 or 0
-        sub ecx, eax  // count of 1 bits that remained in edx
-        lea esp, [esp + sz_auxv * eax]  // allocate one auxv slot, if needed
-        test edx,edx
-        jne L50
-
-        sub esp, 4+ 4+ 4096  // new envp[0], "   =", buffer
-        mov edi, esp
-        call do_auxv  // move; fill new auxv slots with AT_IGNORE
-
-        mov dword ptr [esi], ('='<<24)|(' '<<16)|(' '<<8)|(' '<<0)  // "   ="
-        mov [ebx],esi  // additional envp[0]
-        mov edx,4096  // length
-        lea ecx,[4+ esi]  // buf
-        call L52
+        call 1f
+0:
         .asciz "/proc/self/exe"
-L52:
+1:
         pop ebx  // path
-        push __NR_readlink
-        pop eax
-        int 0x80
-        test eax,eax
-        js L55
-        mov byte ptr [ecx + eax], 0  // NUL terminate the link text
-L55:
-        pop ebx  // recover &Elf32_Ehdr
-        pop esi  // recover total length of compressed data
+        sub ecx,ecx  // O_RDONLY
+        push __NR_open; pop eax; int 0x80
+        mov [F_fd + ebp],eax  // fd for later mmap
 
+        mov edx,-5*2*4 -1+ PATH_MAX  // buflen
+        mov ecx,edi  // buffer
+        // mov ebx,ebx  // name
+        push __NR_readlink; pop eax; int 0x80; test eax,eax; jns 0f
+        mov ecx,ebx  // point at name
+        mov eax,-1+ (1b - 0b)  // len
+0:
+        lea esi,[-1+ ecx + eax]  // src last byte
+        xchg ecx,eax  // ecx= byte count
+
+   std
+        pop edi; dec edi  // abuts old strings; &new_aux[N],-len_aux,&new_env[0]; f_exp,LENX,ADRX,slide,fd,LENU,ADRU,entry,argc
+        mov al,0; stosb  // terminate
+        rep movsb  // slide up
+        mov eax, 0+ ('='<<24)|(' '<<16)|(' '<<8)|(' '<<0)  # env var name
+        sub edi,3; mov [edi],eax
+        mov eax,[-1*4 + ebp]; mov [eax],edi  // new_env[0]
+        and edi,~3  // word align
+
+        pop esi  // P_07  &new_aux[N]; -len_aux,&new_env[0]; f_exp,LENX,ADRX,slide,fd,LENU,ADRU,entry,argc
+// Final sp must be 0 mod 8.  There are now 10 words below argc.
+        mov ecx,esi  // last
+        sub ecx,esp  // length of moved block
+        mov eax,ecx
+        xor eax,edi  // check parity of purported destination
+        and eax,4
+        sub edi,eax  // align &new_aux[last]
+
+        pop edx  // -len_aux; &new_env[0]; f_exp,LENX,ADRX,slide,fd,LENU,ADRU,entry,argc
+          add edx,edi  // edx= &final_aux[0]
+
+        scasd  // edi -= 4
+        lodsd  // esi -= 4
+        shr ecx,2; dec ecx; rep movsd  // dec: compensate for P_07
+   cld
+// Clear the vacated stack, for buggy programs that assume it is 0
+        lea ecx,[1*4+ edi]  // correct for 'std'
+        xor eax,eax  // 0
+        sub ecx,esp
+        mov edi,esp
+        shr ecx,2; rep stosd
+        mov esp,edi
+          mov edi,edx  // &final_aux[0]
+
+        pop eax  // toss &new_env[0]
+        pop ebp  // f_exp
+// stack is back to original state: LENX,ADRX,slide,fd,LENU,ADRU,entry,argc
+
+        pop esi  // LENX: sz_cpr
+        pop eax  // ADRX: &b_info
+        pop ecx  // slide
 #define OVERHEAD 2048
 #define MAX_ELF_HDR 512
-
         sub esp, MAX_ELF_HDR + OVERHEAD  // alloca
-        push ebx  // start of unmap region (&Elf32_Ehdr of this stub)
-
-// Cannot pre-round .p_memsz because kernel requires PF_W to setup .bss,
-// but strict SELinux (or PaX, grsecurity) prohibits PF_W with PF_X.
-        mov edx, [p_memsz + szElf32_Ehdr + ebx]  // phdr[0].p_memsz
-        lea edx, [-1 + 2*PAGE_SIZE + edx + ebx]  // 1 page for round, 1 for unfold
-        and edx, 0-PAGE_SIZE
-
-        push edx  // end of unmap region
-        sub eax, eax  // 0
-        cmp word ptr [e_type + ebx], ET_DYN
-        jne L53
-        xchg eax, edx  // dynbase for ET_DYN; assumes mmap(0, ...) is placed after us!
-L53:
-        push eax  // dynbase
-
-        movzwl eax,[e_phnum + ebx]
-        imul eax,szElf32_Phdr  // sz_Phdrs
-        lea eax, [szElf32_Ehdr + eax + szl_info + szp_info + ebx]  // 1st &b_info
+        mov edx, esp  // &tmp
+        push ecx  // slide (9th arg)
         mov ebx, [   eax]  // length of uncompressed ELF headers
         mov ecx, [4+ eax]  // length of   compressed ELF headers
         add ecx, szb_info
-        lea edx, [3*4 + esp]  // &tmp
-        pusha  // (AT_table, sz_cpr, f_expand, &tmp_ehdr, {sz_unc, &tmp}, {sz_cpr, &b1st_info} )
+               //   edi,    esi,      ebp,       esp,     ebx,  edx,      ecx,        eax
+        pusha  // (auxv, sz_cpr, f_expand, &tmp_ehdr, {sz_unc, &tmp}, {sz_cpr, &b1st_info} )
         inc edi  // swap with above 'pusha' to inhibit auxv_up for PT_INTERP
 .extern upx_main
         call upx_main  // returns entry address
-        add esp, (8 +1)*4  // remove 8 params from pusha, also dynbase
-        pop ecx  // end of unmap region
-        pop ebx  // start of unmap region (&Elf32_Ehdr of this stub)
-        add esp, MAX_ELF_HDR + OVERHEAD  // un-alloca
-        pop edx  // bread crumb size in pages
-        shl edx,12
-        add ebx,edx  // start of unmap region
-        push eax  // save entry address
+        dec edi
 
-        dec edi  // auxv table
+// Buggy programs may depend on uninit stack being 0, so clear what we used.
+        mov esi,eax  // save entry
+        mov edx,edi  // save auxv
+        mov edi,esp
+        mov ecx,((8 +1)*4 + MAX_ELF_HDR + OVERHEAD) >>2  // 8 params, slide, un-alloca
+        xor eax,eax  // 0
+        rep stosd  // clear frame on exit
+        mov esp,edi  // end of frame
+
+        mov [3*4 + esp],esi  // entry
+        pop edi  // fd
+        push edx  // auxv
+        push edi  // fd, auxv, LENU, ADRU, entry, argc
+
+        sub ebp,ebp  // 0 block in file
+        // edi has fd
+        push MAP_PRIVATE; pop esi
+        push PROT_READ; pop edx
+        mov ecx,PAGE_SIZE
+        sub ebx,ebx  // 0 ==> Linux chooses page frame
+        push __NR_mmap; pop eax; int 0x80
+
+        pop ebx  // fd;  auxv, LENU, ADRU, entry, argc
+        push __NR_close; pop eax; int 0x80
+
+        pop edi  // auxv table
         sub eax,eax  // 0, also AT_NULL
         .byte 0x3c  // "cmpb al, byte ..." like "jmp 1+L60" but 1 byte shorter
 L60:
@@ -167,6 +205,8 @@ L60:
         scasd  // a_type
         jne L60  // not AT_NULL
 // edi now points at [AT_NULL]a_un.a_ptr which contains result of make_hatch()
+        pop ecx  // LENU
+        pop ebx  // ADRU
 
         push eax
         push eax
@@ -177,87 +217,27 @@ L60:
         push eax
         push eax  // 32 bytes of zeroes now on stack, ready for 'popa'
 
-        sub ecx, ebx  // length to unmap
         mov al, __NR_munmap  // eax was 0 from L60
         jmp [edi]  // unmap ourselves via escape hatch, then goto entry
 
-// called twice:
-//  1st with esi==edi, ecx=0, edx= bitmap of slots needed: just update edx.
-//  2nd with esi!=edi, ecx= slot_count: move, then append AT_IGNORE slots
-// entry: esi= src = -1+ &argc; edi= dst; ecx= # slots wanted; edx= bits wanted
-// exit:  edi= &auxtab; edx= bits still needed; ecx= 0; ebx= &envp[0]; esi= &auxv[N]
-do_auxv:
-        // cld
-        lodsd; stosd  // saved &Elf32_Ehdr
-        lodsd; stosd  // saved total length of compressed data
-        lodsd; stosd  // crumb
-        lodsd; stosd  // argc can be 0
-
-L10:  // move argv
-        lodsd; stosd
-        test eax,eax
-        jne L10
-
-        xchg edi, ebx  // ebx= &envp[0]
-        add edi, ebx  // insert extra space
-L20:  // move envp
-        lodsd; stosd
-        test eax,eax
-        jne L20
-
-        push edi  // return value
-L30:  // process auxv
-        lodsd  // a_type
-        stosd
-        cmp eax, 32
-        jae L32  // prevent aliasing by 'btr' when 32<=a_type
-        btr edx, eax  // no longer need a slot of type eax  [Carry only]
-L32:
-        test eax, eax  // AT_NULL ?
-        lodsd
-        stosd
-        jnz L30  // a_type != AT_NULL
-
-        sub edi, 8  // backup to AT_NULL
-        add ecx, ecx  // two words per auxv
-        inc eax  // convert 0 to AT_IGNORE
-        rep stosd  // allocate and fill
-        dec eax  // convert AT_IGNORE to AT_NULL
-        stosd  // re-terminate with AT_NULL
-        stosd
-        mov esi,edi  // &auxv[N]
-
-        pop edi  // &auxtab
-        ret
-
-#define __NR_mmap 90
-
-#if 0  //{  too big and ugly; instead convert to mmap() via #define in .c
-MAP_PRIVATE= 2
-MAP_ANON= 0x20
-
-//mmap_privanon: .globl mmap_privanon
-  int3
-        push 0
-        push ~0
-        mov eax,[4*6 + esp]
-        or eax,MAP_PRIVATE|MAP_ANON
-        push eax
-        push [4*6 + esp]
-        push [4*6 + esp]
-        push [4*6 + esp]
-        call mmap
-        add esp,6*4
-        ret
-#endif  //}
-
-mmap: .globl mmap
+mmap: .globl mmap  // what happened to the ebx->args_on_stack method?
+        push ebp
         push ebx
-        lea ebx, [2*4 + esp]
-        push __NR_mmap
-        pop eax
-        int 0x80
+        push esi
+        push edi
+        mov ebx,[ 5*4 + esp]
+        mov ecx,[ 6*4 + esp]
+        mov edx,[ 7*4 + esp]
+        mov esi,[ 8*4 + esp]
+        mov edi,[ 9*4 + esp]
+        mov ebp,[10*4 + esp]
+        shr ebp,12
+        push __NR_mmap; pop eax; int 0x80
+
+        pop edi
+        pop esi
         pop ebx
+        pop ebp
         ret
 
 .balign 4,0

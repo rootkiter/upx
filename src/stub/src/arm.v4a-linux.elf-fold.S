@@ -49,6 +49,7 @@ O_RDONLY=       0
 
 PAGE_SHIFT= 12
 PAGE_SIZE = -(~0<<PAGE_SHIFT)
+PATHMAX=  4096
 
 PATH_MAX= 4096
 
@@ -63,134 +64,124 @@ PATH_MAX= 4096
 #define OVERHEAD 2048
 #define MAX_ELF_HDR 512
 
-fold_begin:
+SP_fd= 3*4
 /* In:
-   r10= &b_info of first compressed block (after move)
-    r9= total size of compressed data
-    r5= f_decompress
-    sp/ ADRU,LENU,sz_unc,crumb,MFLG,argc,argv...
+   r11= &f_exp
+    sp/ LENX,ADRX, dynbase,%fd, ADRU,LENU, f_exp,%entry, argc,argv,0,env,0,auxv
+        (ADRX,LENX) = extent of compressed program (after moving)
+        (ADRU,LENU) = params for final munmap()
 */
-        ldmia sp!,{r3,r4,r6,r7,r8,r11}  @ ADRU,LENU,sz_unc,crumb,MFLG,argc
+fold_begin:
 #if DEBUG  //{
-        mov r0,sp  @ current stack pointer
+#define TRACE_REGS r0-r12,r14,r15
+        mov r0,sp  @ current stack pointer (extra clue)
         stmdb sp!,{TRACE_REGS}; mov r0,#0x10; bl trace
 #endif  //}
+        ldmia sp!,{r4,r5,r6,r7,r8,r9,r10,r11,r12}  @ r12= argc
+        mov r1,sp  @ src (argv)
+        sub sp,sp,#PATH_MAX
+        mov r0,sp  @ dst
+        stmdb sp!,{r4,r5,r6,r7,r8,r9,r10,r11,r12}  @ r12= argc
+        mov r11,r10  @ restore f_exp
+0: // copy argv down
+        ldr r3,[r1],#4; cmp r3,#0
+        str r3,[r0],#4; bne 0b
 
-        add r1,sp,r11,lsl #2  @ skip argv pointers
-        add r1,r1,#4  @ skip argv terminator
-.L10:  @ skip env
-        ldr r2,[r1],#4
-        cmp r2,#0; bne .L10
-.L20:  @ skip auxv
-        ldr r2,[r1],#8
-        cmp r2,#0; bne .L20
+     mov r4,r0  @ &new_env[0]
+        str r3,[r0],#4  @ space for new_env[0]
+0: // copy env down
+        ldr r3,[r1],#4; cmp r3,#0
+        str r3,[r0],#4; bne 0b
 
-        sub r0,r1,#PATH_MAX @ buffer for readlink
-        sub r1,r1,sp  @ amount needed for argv,env,auxv
-        sub r0,r0,#2*4  @ space for added env ptr and copy of space3eq
-        sub r0,r0,r1  @ new_argv= space for argv,env,auxv
+     mov r5,r1  @ &orig_auxv[0]
+0: // copy auxv down
+        ldmia r1!,{r2,r3}; cmp r2,#0
+        stmia r0!,{r2,r3}; bne 0b
+     mov r6,r1  @ &orig_auxv[end]; also &old_strings
+     mov r9,r0  @ &down_auxv[end]
+
+        mov r2,#PATH_MAX
+        mov r1,r0  @ buffer
+        adr r0,proc_self_exe  @ arg1
+        sub r2,r2,#1  @ room for null terminator
+        bl readlink; add r2,r1,r0  @ provisional end
+        cmn r0,#4096; bcc link_ok  @ no error
+        adr r1,proc_self_exe    @ buffer (input name)
+        add r2,r1,#proc_self_align - proc_self_exe  @ end
+link_ok:
+        mov r0,r6  @ &old_strings
+        mov  r3,#0;        strb r3,[r0,#-1]!  @ terminate link name
+0: // copy backwards to beginning
+        ldrb r3,[r2,#-1]!; strb r3,[r0,#-1]!
+        cmp r1,r2; bne 0b
+        mov  r3,#'=';      strb r3,[r0,#-1]!
+        mov  r3,#' ';      strb r3,[r0,#-1]!
+                           strb r3,[r0,#-1]!
+                           strb r3,[r0,#-1]!
+        str r0,[r4]  @ new_env[0]
+
+// preserve 8-byte alignment of stack pointer
+        mov r0,r0,lsr #2
+        mov r0,r0,lsl #2  @ &new_strings
+        eor r3,r6,r0  @ word parity with &old_strings
+        and r3,r3,#4  @ 0 or 4
+        eor r3,r3,#4  @ we add 1 new_env[0]
+        sub r0,r0,r3  @ align mod 8
+
+// copy up auxv,env,argv
+        sub r3,r0,r6  @ &new_auxv[end] - &orig_auxv[end]
+        add r3,r3,r5  @ &new_auxv[0] = delta +  &orig_auxv[0]
+        mov r1,r9  @ &down_auxv[end]
+        str r0,[sp,#6*4]  @ replace f_exp with &new_auxv[end]
+0:
+        ldr r2,[r1,#-4]!; cmp r1,sp
+        str r2,[r0,#-4]!; bne 0b
+        mov sp,r0
+
+// open /proc/self/exe to keep it from disappearing
+        adr r0,proc_self_exe
+        mov r1,#O_RDONLY
+        bl open  @ no error check: cannot recover
+        str r0,[sp,#SP_fd]  @ fd
+
 #if DEBUG  //{
         stmdb sp!,{TRACE_REGS}; mov r0,#0x12; bl trace
 #endif  //}
-        mov r1,sp  @ old_argv
-/* preserve 8-byte alignment of stack pointer */
-        eor r2,sp,r0  @ the misalignment of old_argv and new_argv
-        and r2,r2,#4  @ must be 0 or 4 (mod 8)
-        sub r0,r0,r2  @ new_argv with same 8-byte alignment as old_argv
-        mov sp,r0
-
-        stmdb sp!,{r3,r4,r6,r7,r11}  @ ADRU,LENU,sz_unc,crumb,argc; drop MFLG
-SP_sz_unc= 2*4
-
-        add r11,r11,#1  @ (1+argc) for end of argv
-.Larg:  @ copy argv
-        ldr r2,[r1],#4; subs r11,r11,#1
-        str r2,[r0],#4; bne .Larg
-
-.Lenv:  @ copy env
-        ldr r2,[r1],#4
-        str r2,[r0],#4
-        cmp r2,#0; bne .Lenv
-
-        sub r4,r0,#4  @ added env ptr goes here
-        str r2,[r0],#4  @ terminator after added ptr
-        mov r3,r0  @ new &Elf32_auxv_t
-
-.Laux:  @ copy auxv
-        ldr r2,[r1,#4]  @ .a_val
-        str r2,[r0,#4]
-        ldr r2,[r1],#2*4  @ .a_type
-        str r2,[r0],#2*4
-        cmp r2,#0; bne .Laux
-
-        str r0,[sp,#SP_sz_unc]  @ clobber sz_unc with 1+ &Elf32_auxv_t[AT_NULL@.a_type]
-
-        mov r1,r0
-        str r1,[r4]  @ new env ptr
-        ldr r2,space3eq
-        str r2,[r1],#4  @ "   =" of new env var
-
-        mov r2,#PATH_MAX  @ buffer length
-        adr r0,proc_self_exe
-        sub r2,r2,#1  @ room for null terminator
-        bl readlink; cmn r0,#4096; bcs 0f  @ error
-        mov r2,#0
-        strb r2,[r1,r0]  @ null terminate pathname
-0:
 
 /* Construct arglist for upx_main */
+        mov r5,r11  @ f_exp
+        ldmia sp!,{r9,r10,r11}  @ LENX, ADRX, dynbase
         sub sp,sp,#MAX_ELF_HDR + OVERHEAD  @ alloca
         mov r4,r9  @ total size of compressed data
         ldr r9,[r10,#sz_cpr]  @ xi.size  of ELF headers
         mov r8,sp  @ xo.ptr
         ldr r7,[r10,#sz_unc]  @ xo.size
         adr r6,f_unfilter
+        //mov r3,r3  @ auxv
         add r9,r9,#sz_b_info  @ for unpackExtent
-        mov r11,#0  @ dynbase for ET_EXEC;  FIXME for ET_DYN
-#if defined(ARMEL_DARWIN)  /*{*/
-        ldr r12,4*1 + munmap
-#elif defined(ARMEL_EABI4)  /*}{*/
-        ldr r12,4*2 + munmap
-#elif defined(ARM_OLDABI)  /*}{*/
-        ldr r12,4*0 + munmap
-#else  /*}{*/
-        mov r12,#0
-#endif  /*}*/
 
-        stmdb sp!,{r3,r4,r5,r6,r7,r8,r9,r10,r11,r12}
+        stmdb sp!,{r3,r4,r5,r6,r7,r8,r9,r10,r11}
         ldmia sp!,{r0,r1,r2,r3}
+#if DEBUG  //{
+        stmdb sp!,{TRACE_REGS}; mov r0,#0x13; bl trace
+#endif  //}
 // r0=av; r1=sz_cpr; r2=f_decompress; r3=f_unfilter;
-// xo={sz_unc, &tmp_ehdr}, xi={sz_cpr, &b_info}, dynbase, sys_munmap
+// xo={sz_unc, &tmp_ehdr}, xi={sz_cpr, &b_info}, dynbase
+        bl upx_main
+        add sp,sp,#(9-4)*4
+        add sp,sp,#MAX_ELF_HDR + OVERHEAD  @ un-alloca
 #if DEBUG  //{
         stmdb sp!,{TRACE_REGS}; mov r0,#0x14; bl trace
 #endif  //}
-        bl upx_main
-        add sp,sp,#(10-4)*4
-        add sp,sp,#MAX_ELF_HDR + OVERHEAD  @ un-alloca
-#if DEBUG  //{
-        stmdb sp!,{TRACE_REGS}; mov r0,#0x18; bl trace
-#endif  //}
-        str r0,[sp,#3*4]  @ replace crumb with entry address
+        str r0,[sp,#4*4]  @ entry address
 
-#if 0  //{ make_hatch_arm() does it then
-  @ __clear_cache(hatch, &hatch[2]);
-        ldr r2,[sp,#2*4]  @ 1+ &Elf32_auxv_t[AT_NULL@.a_type]
-        ldr r0,[r2,#4 -2*4]   @ Elf32_auxv_t[AT_NULL@.a_type].a_val
-        add r1,r0,#2*4  @ len= 2 instructions  the "escape hatch"
-        mov r2,#0
-        do_sys7t2 __ARM_NR_cacheflush  @ scribble r7
-#endif  //}
-
-// Map 1 page of /proc/self/exe so that munmap does not remove all references
-        adr r0,proc_self_exe
-        mov r1,#O_RDONLY
-        bl open  @ no error check: cannot recover
-        mov r1,#0
-        str r0,[sp,#-4]!  @ fd
-        mov r0,#0  @ any page
-        mov r1,#PAGE_SIZE
-        mov r2,#PROT_READ
+// Map 1 page of /proc/self/exe so that it does not disappear
+        mov r5,#0  @ SEEK_SET
+        ldr r4,[sp]  @ fd
         mov r3,#MAP_PRIVATE
+        mov r2,#PROT_READ
+        mov r1,#PAGE_SIZE
+        mov r0,#0  @ any address
         bl mmap  @ no error check: cannot recover
         ldr r0,[sp],#4  @ fd
         bl close
@@ -202,8 +193,7 @@ SP_sz_unc= 2*4
         ldr r3,[r2,#4 -2*4]  @ Elf32_auxv_t[AT_NULL@.a_type].a_val
         ldr r4,[r3,#0]  @ 1st instr
         ldr r5,[r3,#4]  @ 2nd instr
-#define TRACE_REGS r0-r12,r14,r15
-        stmdb sp!,{TRACE_REGS}; mov r0,#4; bl trace
+        stmdb sp!,{TRACE_REGS}; mov r0,#0x15; bl trace
 #endif  /*}*/
         mov r3,#0  @ clear registers: paranoia
         mov r4,#0
@@ -237,10 +227,10 @@ sweep:
 #endif  /*}*/
         ldr pc,[r2,#4 -2*4]  @ Elf32_auxv_t[AT_NULL@.a_type].a_val
 
-space3eq:
-        .ascii "   ="
 proc_self_exe:
-        .asciz "/proc/self/exe"
+        .ascii "/proc/self/exe"  @ no terminator
+proc_self_align:
+        .asciz ""  @ terminator
         .balign 4
 
 f_unfilter:  @ (char *ptr, uint len, uint cto, uint fid)
@@ -408,26 +398,34 @@ __clear_cache:
 
         .globl mmap
 mmap:
-        str r5,[sp,#-4]!; ldr r5,[sp,#4+4]
-        str r4,[sp,#-4]!; ldr r4,[sp,#4+4]
+        stmdb sp!,{r4,r5,lr}
+        ldr r5,[sp,#4*4]
+        ldr r4,[sp,#3*4]
         mov r5,r5,lsr #12  @ convert to page number
 mmap_do:
         do_sys __NR_mmap2
-        ldr r4,[sp],#4
-        ldr r5,[sp],#4
+        ldmia sp!,{r4,r5,pc}
+
+get_sys_munmap: .globl get_sys_munmap  // r0= system call instruction
+#if defined(ARMEL_DARWIN)  /*{*/
+        ldr r0,4*1 + munmap
+#elif defined(ARMEL_EABI4)  /*}{*/
+        ldr r0,4*2 + munmap
+#elif defined(ARM_OLDABI)  /*}{*/
+        ldr r0,4*0 + munmap
+#else  /*}{*/
+        mov r0,#0
+#endif  /*}*/
         ret
 
-bits_privanon= -4+ fold_begin  // entry stores: MAP_{PRIVATE|ANON}  QNX vs linux
-
 mmap_privanon: .globl mmap_privanon
-        ldr r12,bits_privanon  @ r12 === ip
-        str r5,[sp,#-4]!; mov r5,#0  @ offset= 0
-        str r4,[sp,#-4]!; mvn r4,#0  @ fd= -1
-        orr r3,r3,r12  @ flags |= MAP_{PRIVATE|ANON}  [QNX vs Linux]
-        b mmap_do
+        stmdb sp!,{r4,r5,lr}
+        mov r5,#0  @ offset= 0
+        mvn r4,#0  @ fd= -1
+        adr lr, mmap_do
+        b fold_begin -2*4  // fix r3 for QNX vs Linux
 
-
-#if DEBUG  /*{*/
+#if 1|DEBUG  /*{*/
 
 div10: .globl div10
         mov ip,r0  @ extra copy used at end
@@ -461,8 +459,5 @@ div10: .globl div10
         ret
 
 #endif  /*}*/
-
-/* Preserve symlink /proc/self/exe by mapping one page into stack */
-
 
 /* vim:set ts=8 sw=8 et: */

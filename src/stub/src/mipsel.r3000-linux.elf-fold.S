@@ -74,7 +74,7 @@ BAL=0x04110000
 /* In:
     s7= &decompress
 
-    s5= sz_pack2
+    s5= total_size
 
     s3= ADRU
     s2= LENU
@@ -100,7 +100,13 @@ L20:  # copy env
 L30:  # copy auxv
         lw tmp,0(v0); lw t0,4(v0); addiu v0,sz_auxv
         sw tmp,0(v1); sw t0,4(v1); addiu v1,sz_auxv
-        bnez tmp,L30  # stop when v0= &auxv[N]
+AT_PAGESZ= 6
+        addiu tmp,tmp,-AT_PAGESZ  # alter tmp
+        bnez  tmp,0f
+          addiu tmp,tmp,AT_PAGESZ  # restore tmp
+        negu s8,t0  # -PAGE_SIZE
+0:
+        bnez tmp,L30  # AT_NULL: stop when v0= &auxv[N]
           move s6,v1  # new &auxv[N]
 
         sw v1,0(s0)  # new env[0]
@@ -114,7 +120,7 @@ L30:  # copy auxv
         li a2,PATHSIZE-1
         addiu a1,v1,4  # &buf[0]
         bal 9f
-          move a0,ra
+          move a0,ra  # &path
         .asciz "/proc/self/exe"
         .balign 4
 9:
@@ -125,11 +131,12 @@ L30:  # copy auxv
         sb $0,(tmp)  # null terminate the path
 0:
         addiu sp,-MAX_ELF_HDR  # alloca
+        move t2,s8  # page_mask
         move t1,zero  # &f_unfilter
         move t0,s7  # &f_decompress
         move a3,s4  # new &auxv[0]
         move a2,sp  # &Elf32_Ehdr tmp space
-        addiu a1,s5,-(sz_Ehdr + 2*sz_Phdr + sz_l_info + sz_p_info)
+        move a1,s5  # total_size
 
 /* We need a position-independent call of upx_main, which is external.
    "bal upx_main" cannot be assembled by mipsel-elf-as-20060406.
@@ -146,8 +153,8 @@ L30:  # copy auxv
         addiu v0,v0,%lo(upx_main)
         jalr v0
           move a0,s1
-/* entry= upx_main(b_info *a0, total_size a1, Elf32_Ehdr *a2,
-                Elf32_Auxv_t *a3, f_decompr t0, f_unfilter t1 )
+/* entry= upx_main(b_info *a0, total_size a1, Elf32_Ehdr *a2, Elf32_Auxv_t *a3,
+        f_decompr t0, f_unfilter t1, page_mask t2 )
 */
         move jp,v0  # &entry
 /* Workaround suspected glibc bug: elf/rtld.c assumes uninit local is zero.
