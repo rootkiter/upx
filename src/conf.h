@@ -339,7 +339,8 @@ private:
 
 
 // magic constants for patching
-#define UPX_MAGIC_LE32          0x21585055      /* "UPX!" */
+#define UPX_MAGIC_LE32_OLD      0x21585055      /* "UPX!" */
+#define UPX_MAGIC_LE32          get_real_magic()
 #define UPX_MAGIC2_LE32         0xD5D0D8A1
 
 
@@ -657,6 +658,9 @@ void e_exit(int ec) __attribute__((__noreturn__));
 #else
 void e_exit(int ec);
 #endif
+
+void magic_update(const char *);
+unsigned int get_real_magic();
 
 
 // msg.cpp

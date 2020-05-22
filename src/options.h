@@ -75,6 +75,7 @@ struct options_t {
     bool no_env;
     bool no_progress;
     const char *output_name;
+    const char *magic_value;
     bool preserve_mode;
     bool preserve_ownership;
     bool preserve_timestamp;

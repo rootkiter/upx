@@ -84,6 +84,7 @@ static options_t global_options;
 options_t *opt = &global_options;
 
 static int done_output_name = 0;
+static int done_magic_value = 0;
 
 
 const char *argv0 = "";
@@ -365,6 +366,27 @@ static void set_output_name(const char *n, bool allow_m)
     done_output_name++;
 }
 
+static void set_magic_value(const char *n, bool allow_m){
+#if 1
+    if (done_magic_value > 0)
+    {
+        fprintf(stderr,"%s: option '--magic' more than once given\n",argv0);
+        e_usage();
+    }
+#endif
+    if (!n || !n[0] || (!allow_m && n[0] == '0' && n[1]=='x'))
+    {
+        fprintf(stderr,"%s: missing magic value\n",argv0);
+        e_usage();
+    }
+    if (strlen(n) > 10)
+    {
+        fprintf(stderr,"%s: magic value too long\n",argv0);
+        e_usage();
+    }
+    opt->magic_value = n;
+    done_magic_value++;
+}
 
 /*************************************************************************
 // get options
@@ -506,6 +528,9 @@ static int do_option(int optc, const char *arg)
         break;
     case 'L':
         set_cmd(CMD_LICENSE);
+        break;
+    case 'm':
+        set_magic_value(mfx_optarg,1);
         break;
     case 'o':
         set_output_name(mfx_optarg,1);
@@ -917,6 +942,7 @@ static const struct mfx_option longopts[] =
     {"no-progress",         0, 0, 516},     // no progress bar
     {"no-time",          0x10, 0, 528},     // do not preserve timestamp
     {"output",           0x21, 0, 'o'},
+    {"magic",            0x21, 0, 'm'},     // fix UPX_MAGIC_LE32
     {"quiet",               0, 0, 'q'},     // quiet mode
     {"silent",              0, 0, 'q'},     // quiet mode
 #if 0

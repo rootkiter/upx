@@ -242,6 +242,18 @@ void do_one_file(const char *iname, char *oname) {
 // process all files from the commandline
 **************************************************************************/
 
+unsigned int global_magic_value = UPX_MAGIC_LE32_OLD;
+
+void magic_update(const char *magic_str) {
+    unsigned int magic_value;
+    sscanf(magic_str, "0x%x", &magic_value);
+    global_magic_value = magic_value;
+}
+
+unsigned int get_real_magic () {
+    return global_magic_value;
+}
+
 static void unlink_ofile(char *oname) {
     if (oname && oname[0]) {
 #if (HAVE_CHMOD)
@@ -258,6 +270,10 @@ void do_files(int i, int argc, char *argv[]) {
     if (opt->verbose >= 1) {
         show_head();
         UiPacker::uiHeader();
+    }
+
+    if(opt->magic_value != NULL && strlen(opt->magic_value)>0){
+        magic_update(opt->magic_value);
     }
 
     for (; i < argc; i++) {

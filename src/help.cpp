@@ -204,6 +204,7 @@ void show_help(int verbose)
                 "  -oFILE write output to 'FILE'\n"
                 //"  -f     force overwrite of output files and compression of suspicious files\n"
                 "  -f     force compression of suspicious files\n"
+                "  -m     UPX_MAGIC_LE32 [0x21585055]->\"ELF!\"\n"
                 "%s%s"
                 , (verbose == 0) ? "  -k     keep backup files\n" : ""
 #if 1
